@@ -38,6 +38,25 @@ jobs:
         id: get-branch
         run: echo "BRANCH_NAME=${GITHUB_REF##*/}" >> $GITHUB_ENV
 
+      - name: Delete Old Images with Same Branch Name
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: snap-server
+          BRANCH_NAME: ${{ env.BRANCH_NAME }}
+        run: |
+          aws ecr list-images --repository-name $ECR_REPOSITORY --query 'imageIds[*]' --output json > image_ids.json
+          OLD_IMAGE_IDS=$(jq -r '.[] | select(.imageTag != null and (.imageTag | type == "string") and (.imageTag | startswith(env.BRANCH_NAME + "-"))) | @base64' image_ids.json)
+          DELETED_IMAGES=""
+          for image_id in $OLD_IMAGE_IDS; do
+            image_digest=$(echo $image_id | base64 --decode | jq -r '.imageDigest')
+            image_tag=$(echo $image_id | base64 --decode | jq -r '.imageTag')
+            if [[ $image_tag =~ ^${BRANCH_NAME}-[a-z0-9]{7}$ ]]; then
+              aws ecr batch-delete-image --repository-name $ECR_REPOSITORY --image-ids imageDigest=$image_digest
+              DELETED_IMAGES="$DELETED_IMAGES $image_tag"
+            fi
+          done
+          echo "Deleted images: $DELETED_IMAGES"
+
       - name: Build, Tag, and Push The Image to Amazon ECR
         id: build-image
         env:
@@ -83,21 +102,3 @@ jobs:
           aws ecs update-service --cluster $CLUSTER_NAME --service $SERVICE_NAME --task-definition $NEW_TASK_DEF_ARN
       
 
-      - name: Delete Old Images with Same Branch Name
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          ECR_REPOSITORY: snap-server
-          BRANCH_NAME: ${{ env.BRANCH_NAME }}
-        run: |
-          aws ecr list-images --repository-name $ECR_REPOSITORY --query 'imageIds[*]' --output json > image_ids.json
-          OLD_IMAGE_IDS=$(jq -r '.[] | select(.imageTag != null and (.imageTag | type == "string") and (.imageTag | startswith(env.BRANCH_NAME + "-"))) | @base64' image_ids.json)
-          DELETED_IMAGES=""
-          for image_id in $OLD_IMAGE_IDS; do
-            image_digest=$(echo $image_id | base64 --decode | jq -r '.imageDigest')
-            image_tag=$(echo $image_id | base64 --decode | jq -r '.imageTag')
-            if [[ $image_tag =~ ^${BRANCH_NAME}-[a-z0-9]{7}$ ]]; then
-              aws ecr batch-delete-image --repository-name $ECR_REPOSITORY --image-ids imageDigest=$image_digest
-              DELETED_IMAGES="$DELETED_IMAGES $image_tag"
-            fi
-          done
-          echo "Deleted images: $DELETED_IMAGES"
