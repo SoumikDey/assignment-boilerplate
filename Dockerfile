@@ -1,15 +1,7 @@
 
-FROM node:21-alpine3.17 AS build
-RUN apk --no-cache add curl
-
+FROM node:21-alpine3.17
 WORKDIR /app
-
-COPY package*.json ./
-
-RUN npm install
-
 COPY . .
-
+RUN npm install
 EXPOSE 6041
-
 ENTRYPOINT ["node", "index.js"]
