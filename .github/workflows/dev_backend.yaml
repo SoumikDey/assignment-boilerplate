@@ -1,0 +1,103 @@
+name: Dev Backend Build and Push
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build_and_push_job:
+    runs-on: ubuntu-latest
+    name: Build and Push to ECR Job
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          submodules: true
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v3
+        with:
+          role-to-assume: arn:aws:iam::167814279506:role/DevSnapGitHubActionToECROICD-Backend
+          aws-region: ap-southeast-1
+
+      - name: Login to Amazon ECR (Elastic Container Registry)
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Get Git Commit Hash
+        id: git-commit
+        run: echo "COMMIT_HASH=$(git log -1 --pretty=format:'%h')" >> $GITHUB_ENV
+
+      - name: Get Branch Name
+        id: get-branch
+        run: echo "BRANCH_NAME=${GITHUB_REF##*/}" >> $GITHUB_ENV
+
+      - name: Delete Old Images with Same Branch Name
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: snap-server
+          BRANCH_NAME: ${{ env.BRANCH_NAME }}
+        run: |
+          aws ecr list-images --repository-name $ECR_REPOSITORY --query 'imageIds[*]' --output json > image_ids.json
+          OLD_IMAGE_IDS=$(jq -r '.[] | select(.imageTag != null and (.imageTag | type == "string") and (.imageTag | startswith(env.BRANCH_NAME + "-"))) | @base64' image_ids.json)
+          DELETED_IMAGES=""
+          for image_id in $OLD_IMAGE_IDS; do
+            image_digest=$(echo $image_id | base64 --decode | jq -r '.imageDigest')
+            image_tag=$(echo $image_id | base64 --decode | jq -r '.imageTag')
+            if [[ $image_tag =~ ^${BRANCH_NAME}-[a-z0-9]{7}$ ]]; then
+              aws ecr batch-delete-image --repository-name $ECR_REPOSITORY --image-ids imageDigest=$image_digest
+              DELETED_IMAGES="$DELETED_IMAGES $image_tag"
+            fi
+          done
+          echo "Deleted images: $DELETED_IMAGES"
+
+      - name: Build, Tag, and Push The Image to Amazon ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: snap-server
+          IMAGE_TAG: ${{ env.BRANCH_NAME }}-${{ env.COMMIT_HASH }}
+        run: |
+          echo "ECR_REGISTRY=${ECR_REGISTRY}" >> $GITHUB_ENV
+          echo "ECR_REPOSITORY=${ECR_REPOSITORY}" >> $GITHUB_ENV
+          echo "IMAGE_TAG=${IMAGE_TAG}" >> $GITHUB_ENV
+
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+
+      - name: Install jq
+        run: sudo apt-get install -y jq
+
+      - name: Update ECS Task Definition
+        id: update-task-def
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: snap-server
+          IMAGE_TAG: ${{ env.BRANCH_NAME }}-${{ env.COMMIT_HASH }}
+          TASK_DEFINITION: dev-snap-server-task
+        run: |
+          CURRENT_TASK_DEF=$(aws ecs describe-task-definition --task-definition $TASK_DEFINITION --query 'taskDefinition')
+          NEW_TASK_DEF=$(echo $CURRENT_TASK_DEF | jq --arg IMAGE "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" '
+            .containerDefinitions[0].image = $IMAGE |
+            .containerDefinitions[0].portMappings = [
+              {"containerPort": 6041, "hostPort": 6041, "protocol": "tcp"}
+            ] |
+            del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)')
+          echo $NEW_TASK_DEF > new-task-def.json
+          aws ecs register-task-definition --cli-input-json file://new-task-def.json
+
+      - name: Update ECS Service
+        env:
+          CLUSTER_NAME: dev-snap-ecs-backend-cluster
+          SERVICE_NAME: snap-server-api-svc
+          TASK_DEFINITION: dev-snap-server-task
+        run: |
+          NEW_TASK_DEF_ARN=$(aws ecs describe-task-definition --task-definition $TASK_DEFINITION --query 'taskDefinition.taskDefinitionArn' --output text)
+          aws ecs update-service --cluster $CLUSTER_NAME --service $SERVICE_NAME --task-definition $NEW_TASK_DEF_ARN
+
+      
