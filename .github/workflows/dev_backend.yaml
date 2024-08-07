@@ -24,6 +24,7 @@ jobs:
         with:
           role-to-assume: arn:aws:iam::167814279506:role/DevSnapGitHubActionToECROICD-Backend
           aws-region: ap-southeast-1
+          audience: sts.amazonaws.com
 
       - name: Login to Amazon ECR (Elastic Container Registry)
         id: login-ecr
@@ -99,5 +100,3 @@ jobs:
         run: |
           NEW_TASK_DEF_ARN=$(aws ecs describe-task-definition --task-definition $TASK_DEFINITION --query 'taskDefinition.taskDefinitionArn' --output text)
           aws ecs update-service --cluster $CLUSTER_NAME --service $SERVICE_NAME --task-definition $NEW_TASK_DEF_ARN
-
-      
